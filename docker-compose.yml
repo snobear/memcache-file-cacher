@@ -1,5 +1,6 @@
 memcached:
   container_name: memcached
   image: memcached:latest
+  command: -m 1000
   ports:
     - "11211:11211"
