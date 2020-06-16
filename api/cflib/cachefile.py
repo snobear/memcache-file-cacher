@@ -6,33 +6,35 @@ from pymemcache.client import base
 import re
 import os
 from werkzeug.utils import secure_filename
+from cflib.log import setup_logging
 
-# max chunk size
-#CHUNK_SIZE = 999900
-#CHUNK_SIZE = 262144
-# note: I assumed max item size was 1MB, but it appears to be 512k?
-# after testing and monitoring "stat slabs", this was the "winner" efficiency-wise
-CHUNK_SIZE = 524288
+log = setup_logging(level='debug', log_to_terminal=True)
+
 
 class CacheFile(object):
-    def __init__(self):
+    def __init__(self, memcache_host, memcache_port, chunk_size=524288):
         """Connect to memcache"""
-        # this should be in a config file
-        self.client = base.Client(('localhost', 11211))
+        try:
+            self.client = base.Client((memcache_host, memcache_port))
+        except Exception as e:
+            log.error("failed to connect to memcache instance: %s" % e)
+
+        self.chunk_size = chunk_size
 
     def __set_value(self, key, chunk):
         """Write a value to memcache"""
         try:
             self.client.set(key, chunk)
         except Exception as e:
-            print("set_value exception" % e)
+            log.error("set_value exception" % e)
             raise e
 
     def __get_file_id(self, fname):
         """
         Return sanitized filename.
         This is very basic and pretty restrictive. memcache allows more
-        characters than this set, but just illustrates the need to sanitize user input.
+        characters than this set, but just illustrates the need to
+        sanitize user input.
         """
         return re.sub('[^a-zA-Z0-9-_]', '', fname)
 
@@ -40,33 +42,36 @@ class CacheFile(object):
         try:
             os.remove(file_path)
         except Exception as e:
-            print("error removing temp file at %s" % file_path, e)
+            log.error("error removing temp file at %s" % file_path, e)
             pass
 
     def __chunk_and_store(self, filename, file_path):
-        """Read file from disk and store chunks in memcache. Return # of chunks stored"""
+        """
+        Read file from disk and store chunks in memcache.
+        Return # of chunks stored
+        """
         chunk_count = 0
         file_hash = hashlib.md5()
 
         with open(file_path, "rb") as f:
             while True:
-                chunk = f.read(CHUNK_SIZE)
+                chunk = f.read(self.chunk_size)
                 if len(chunk) == 0:
                     break
                 self.__set_value("%s_%d" % (filename, chunk_count), chunk)
                 file_hash.update(chunk)
-                chunk_count += 1   
+                chunk_count += 1
 
         self.__delete_temp_file(file_path)
 
         return chunk_count, file_hash.hexdigest()
- 
+
     """
     Public methods
     """
     def delete_file(self, file_id, chunk_count):
         """Remove a file from memcached - delete all chunks and metadata"""
-        print("deleting file cache for file_id=%s" % file_id)
+        log.info("deleting file cache for file_id=%s" % file_id)
 
         # delete all file chunks
         for idx in range(0, int(chunk_count)):
@@ -94,14 +99,16 @@ class CacheFile(object):
                 retrieved_file_hash.update(chunk)
                 retrieved_chunk_count += 1
         except Exception as e:
-            # file cache has likely been evicted (we should catch specific exceptions here)
+            # file cache has likely been evicted
             _file = None
-            print("error retrieving file", e)
+            log.error("error retrieving file: %s" % e)
             pass
 
         return _file, retrieved_file_hash.hexdigest(), retrieved_chunk_count
 
-    def is_valid_filesize_in_request(self, request, min_bytes = 0, max_bytes = 52428800):
+    def is_valid_filesize_in_request(
+            self, request, min_bytes=0, max_bytes=52428800
+            ):
         """
         Check size of file in upload request
         """
@@ -113,16 +120,20 @@ class CacheFile(object):
             return True
         else:
             file_size_bytes = request.content_length
-            print("uploaded file content-length:", file_size_bytes)
-            if (file_size_bytes > min_bytes) and (file_size_bytes <= adjusted_max_bytes):
+            log.debug("uploaded file content-length: %s" % file_size_bytes)
+            if (file_size_bytes > min_bytes) and \
+                    (file_size_bytes <= adjusted_max_bytes):
                 return True
 
         return False
 
-    def is_valid_filesize_on_disk(self, file_path, min_bytes = 0, max_bytes = 52428800):
+    def is_valid_filesize_on_disk(
+            self, file_path, min_bytes=0, max_bytes=52428800
+            ):
         """
         Check size of file on disk.
-        This is used as a fallback if the safer is_valid_filesize() cannot be performed,
+        This is used as a fallback if the safer is_valid_filesize()
+        cannot be performed,
         or as an extra confirmation in case content-length is spoofed.
         Returns True if file is within size limit, otherwise False
         """
@@ -144,7 +155,7 @@ class CacheFile(object):
         chunk_count = self.client.get("%s_chunk_count" % file_id)
         if chunk_count is None:
             return False
-    
+
         stored_checksum = self.client.get("%s_checksum" % file_id)
         if stored_checksum is None:
             return False
@@ -158,20 +169,21 @@ class CacheFile(object):
         # first delete existing file from cache
         try:
             file_id = self.__get_file_id(filename)
-            print("deleting cached file_id=%s if it exists" % file_id)
+            log.info("deleting cached file_id=%s if it exists" % file_id)
             meta = self.get_stored_file_meta(file_id)
             if meta:
                 self.delete_file(file_id, meta[0])
         except Exception as e:
-            print("delete error for file_id=%s" % file_id, e)
+            log.error("delete error for file_id=%s: %s" % (file_id, e))
             return False, file_id, None
 
         # chunk and store file
         try:
-            print("caching file at %s" % file_path)
+            log.info("caching file at %s" % file_path)
             chunk_count, checksum = self.__chunk_and_store(file_id, file_path)
         except Exception as e:
-            print("chunk and store error for file_id=%s" % file_id, e)
+            log.error("chunk and store error for file_id=%s: %s" %
+                      (file_id, e))
             return False, file_id, None
 
         # store file metadata
@@ -179,8 +191,10 @@ class CacheFile(object):
             self.__set_value("%s_checksum" % file_id, checksum)
             self.__set_value("%s_chunk_count" % file_id, chunk_count)
         except Exception as e:
-            print("error setting file metadata for file_id=%s" % file_id, e)
-            # file cache is no good without metadata, so clean up keys if have the chunk count
+            log.error("error setting file metadata for file_id=%s: %s" %
+                      (file_id, e))
+            # file cache is no good without metadata
+            # so clean up keys if have the chunk count
             if chunk_count:
                 self.delete_file(file_id, chunk_count)
             return False, file_id, None
@@ -191,12 +205,12 @@ class CacheFile(object):
         """
         Save uploaded file to disk.
         Return file path and its checksum
-        """ 
+        """
         try:
             raw_filename = file_upload_object.filename
             safe_filename = secure_filename(raw_filename)
             file_path = os.path.join(upload_dir, safe_filename)
-            print("saving uploaded file to disk at %s" % file_path)
+            log.info("saving uploaded file to disk at %s" % file_path)
             file_upload_object.save(file_path)
 
             # stream from file to calculate checksum
@@ -210,7 +224,8 @@ class CacheFile(object):
                         break
             checksum = file_hash.hexdigest()
         except Exception as e:
-            print("error saving file to disk filename=%s" % raw_filename, e)
+            log.error("error saving file to disk filename=%s: %s" %
+                      (raw_filename, e))
             self.__delete_temp_file(file_path)
             raise e
 

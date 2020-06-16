@@ -1,6 +1,21 @@
-memcached:
-  container_name: memcached
-  image: memcached:latest
-  command: -m 1000
-  ports:
-    - "11211:11211"
+version: '3'
+services:
+  tests:
+    build:
+      context: ./tests
+    depends_on:
+      - api
+  api:
+    container_name: api
+    ports:
+      - "3000:3000"
+    build:
+      context: ./api
+    depends_on:
+      - memcached
+  memcached:
+    container_name: memcached
+    image: memcached:latest
+    command: -m 1000
+    ports:
+      - "11211:11211"
