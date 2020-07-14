@@ -1,10 +1,8 @@
-**Interview submission for Jason Ashby - SRE** :wave:
-
 # File Cache API
 
 A REST API that allows a user to:
 
-- upload a file that is then cached in memcache
+- upload a file that is then chunked and cached in memcache
 - retrieve/download a cached file
 
 All py source files are pep8 compliant per `pycodestyle`.
